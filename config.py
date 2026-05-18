@@ -6,3 +6,6 @@ OPENAI_BASE_URL = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 ORCHESTRATOR_MODEL = "gpt-4o"
 AGENT_MODEL = "gpt-4o"
 MAX_TOKENS = 8192
+
+CHROMA_HOST = os.environ.get("CHROMA_HOST", "localhost")
+CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8001"))

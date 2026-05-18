@@ -2,9 +2,22 @@ import sqlite3
 import json
 from pathlib import Path
 from memory.layers import Pattern, Procedure, Episode, Skill, EvolutionEntry
+import config
 
 _BASE = Path.home() / ".multi_agent"
 _DB_PATH = _BASE / "memory.db"
+
+
+def _init_chroma_client():
+    """连接到本地 ChromaDB HTTP 服务，失败时返回 None。"""
+    try:
+        import chromadb
+        client = chromadb.HttpClient(host=config.CHROMA_HOST, port=config.CHROMA_PORT)
+        client.heartbeat()  # 验证连接
+        col = client.get_or_create_collection("episodes")
+        return col
+    except Exception:
+        return None
 
 
 class MemoryStore:
@@ -13,6 +26,7 @@ class MemoryStore:
         self._conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
+        self._col = _init_chroma_client()  # 连接已运行的服务，无需下载模型
 
     def _init_schema(self):
         self._conn.executescript("""
@@ -125,12 +139,26 @@ class MemoryStore:
              e.failure_reason, e.execution_summary,
              e.created_at),
         )
-        # 同步更新 FTS 索引
         self._conn.execute(
             "INSERT OR REPLACE INTO episodes_fts(id, intent) VALUES (?,?)",
             (e.id, e.intent),
         )
         self._conn.commit()
+
+        if self._col is not None:
+            try:
+                self._col.upsert(
+                    ids=[e.id],
+                    documents=[e.intent],
+                    metadatas=[{
+                        "outcome": e.outcome,
+                        "task_shape": e.task_shape,
+                        "systems": ",".join(e.systems),
+                        "agents": ",".join(e.agents_used),
+                    }],
+                )
+            except Exception:
+                pass
 
     def update_feedback(self, episode_id: str, feedback: str):
         self._conn.execute(
@@ -142,17 +170,42 @@ class MemoryStore:
     def find_similar_episodes(
         self, intent: str, systems: list[str], top_k: int = 3
     ) -> list[Episode]:
-        """用 FTS5 全文检索 + 系统交集过滤，无需外部模型。"""
+        # 优先用 ChromaDB 语义检索
+        if self._col is not None:
+            return self._find_by_chroma(intent, systems, top_k)
+        # 降级：SQLite FTS5 关键词检索
+        return self._find_by_fts(intent, systems, top_k)
+
+    def _find_by_chroma(self, intent: str, systems: list[str], top_k: int) -> list[Episode]:
+        try:
+            results = self._col.query(query_texts=[intent], n_results=min(top_k * 3, 20))
+            if not results["ids"][0]:
+                return []
+            ranked, fallback = [], []
+            for i, meta in enumerate(results["metadatas"][0]):
+                eid = results["ids"][0][i]
+                ep_systems = set(meta.get("systems", "").split(","))
+                if systems and ep_systems.intersection(systems):
+                    ranked.append(eid)
+                else:
+                    fallback.append(eid)
+            candidate_ids = (ranked + fallback)[:top_k]
+            if not candidate_ids:
+                return []
+            ph = ",".join("?" * len(candidate_ids))
+            rows = self._conn.execute(
+                f"SELECT * FROM episodes WHERE id IN ({ph})", candidate_ids
+            ).fetchall()
+            return [self._to_episode(r) for r in rows]
+        except Exception:
+            return self._find_by_fts(intent, systems, top_k)
+
+    def _find_by_fts(self, intent: str, systems: list[str], top_k: int) -> list[Episode]:
         if not intent.strip():
             return []
-
-        # 把 intent 拆成关键词做 FTS 查询
-        keywords = " OR ".join(
-            f'"{w}"' for w in intent.split() if len(w) > 1
-        )
+        keywords = " OR ".join(f'"{w}"' for w in intent.split() if len(w) > 1)
         if not keywords:
             return []
-
         try:
             rows = self._conn.execute(
                 """SELECT e.* FROM episodes e
@@ -163,18 +216,12 @@ class MemoryStore:
             ).fetchall()
         except Exception:
             return []
-
         episodes = [self._to_episode(r) for r in rows]
-
-        # 优先返回系统有交集的
         if systems:
             with_overlap = [e for e in episodes if set(e.systems).intersection(systems)]
             without = [e for e in episodes if e not in with_overlap]
-            episodes = (with_overlap + without)[:top_k]
-        else:
-            episodes = episodes[:top_k]
-
-        return episodes
+            return (with_overlap + without)[:top_k]
+        return episodes[:top_k]
 
     def find_success_episodes(self, agents: list[str], systems: list[str]) -> list[Episode]:
         rows = self._conn.execute(
