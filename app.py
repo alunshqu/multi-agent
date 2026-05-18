@@ -2,7 +2,7 @@ import asyncio
 import threading
 import tkinter as tk
 from tkinter import scrolledtext
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from agents.orchestrator import Orchestrator
 from core.context import SharedContext
 from memory.store import MemoryStore
@@ -26,8 +26,8 @@ class App(tk.Tk):
         self._thread.start()
 
         self._store = MemoryStore()
-        if config.ANTHROPIC_API_KEY:
-            client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+        if config.OPENAI_API_KEY:
+            client = AsyncOpenAI(api_key=config.OPENAI_API_KEY, base_url=config.OPENAI_BASE_URL)
             context = SharedContext()
             self._orchestrator = Orchestrator(client, context, self._store)
         else:
@@ -106,7 +106,7 @@ class App(tk.Tk):
 
         # 无 API key 提示
         if not self._orchestrator:
-            self._append("error_text", "⚠️  未检测到 ANTHROPIC_API_KEY，请在 .env 文件中配置后重启。\n\n")
+            self._append("error_text", "⚠️  未检测到 OPENAI_API_KEY，请设置环境变量后重启。\n\n")
 
         self._append("thinking", "你好！我可以帮你操作电脑、浏览网页、分析数据、写代码、调用系统……直接告诉我你想做什么。\n\n")
 

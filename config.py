@@ -1,9 +1,8 @@
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-ORCHESTRATOR_MODEL = "claude-opus-4-7"
-AGENT_MODEL = "claude-sonnet-4-6"
+ORCHESTRATOR_MODEL = "gpt-4o"
+AGENT_MODEL = "gpt-4o"
 MAX_TOKENS = 8192

@@ -1,4 +1,4 @@
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from memory.store import MemoryStore
 from memory.layers import Episode, Pattern, Procedure
 import config
@@ -8,7 +8,7 @@ _PROMOTE_THRESHOLD = 3
 
 
 class MemoryPromoter:
-    def __init__(self, store: MemoryStore, client: AsyncAnthropic):
+    def __init__(self, store: MemoryStore, client: AsyncOpenAI):
         self.store = store
         self.client = client
 
@@ -39,7 +39,7 @@ class MemoryPromoter:
             f"- 任务：{e.intent}，失败原因：{e.failure_reason}"
             for e in episodes
         )
-        resp = await self.client.messages.create(
+        resp = await self.client.chat.completions.create(
             model=config.AGENT_MODEL,
             max_tokens=256,
             messages=[{
@@ -51,7 +51,7 @@ class MemoryPromoter:
                 ),
             }],
         )
-        content = resp.content[0].text.strip()
+        content = resp.choices[0].message.content.strip()
         pattern = Pattern(
             content=content,
             trigger_keywords=list({s for e in episodes for s in e.systems})[:4],

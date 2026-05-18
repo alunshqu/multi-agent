@@ -1,4 +1,4 @@
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from agents.base import BaseAgent
 from core.task import SubTask, TaskResult
 from core.context import SharedContext

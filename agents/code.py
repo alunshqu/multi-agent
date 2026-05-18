@@ -1,5 +1,5 @@
 import json
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from agents.base import BaseAgent
 from core.task import SubTask, TaskResult
 from core.context import SharedContext
@@ -42,7 +42,7 @@ _STATIC_TOOLS = [
 
 
 class CodeAgent(BaseAgent):
-    def __init__(self, client: AsyncAnthropic, context: SharedContext, forge: ToolForge):
+    def __init__(self, client: AsyncOpenAI, context: SharedContext, forge: ToolForge):
         super().__init__(client, context)
         self._forge = forge
         self._dynamic_tools: list[dict] = forge.load_all()

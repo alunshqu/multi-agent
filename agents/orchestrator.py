@@ -1,6 +1,6 @@
 import asyncio
 import json
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from core.task import SubTask, TaskResult, AgentType
 from core.context import SharedContext
 from agents.browser import BrowserAgent
@@ -96,7 +96,7 @@ _ORCHESTRATOR_SYSTEM = """你是一个任务编排器，负责将用户请求分
 
 
 class Orchestrator:
-    def __init__(self, client: AsyncAnthropic, context: SharedContext, store: MemoryStore):
+    def __init__(self, client: AsyncOpenAI, context: SharedContext, store: MemoryStore):
         self.client = client
         self.context = context
         self.store = store
@@ -153,30 +153,41 @@ class Orchestrator:
         if memory_prompt:
             content = f"{memory_prompt}\n\n{content}"
 
-        messages = [{"role": "user", "content": content}]
-        response = await self.client.messages.create(
+        oai_tool = {
+            "type": "function",
+            "function": {
+                "name": _DECOMPOSE_TOOL["name"],
+                "description": _DECOMPOSE_TOOL["description"],
+                "parameters": _DECOMPOSE_TOOL["input_schema"],
+            },
+        }
+        response = await self.client.chat.completions.create(
             model=config.ORCHESTRATOR_MODEL,
             max_tokens=2048,
-            system=[{"type": "text", "text": _ORCHESTRATOR_SYSTEM, "cache_control": {"type": "ephemeral"}}],
-            messages=messages,
-            tools=[_DECOMPOSE_TOOL],
-            tool_choice={"type": "any"},
+            messages=[
+                {"role": "system", "content": _ORCHESTRATOR_SYSTEM},
+                {"role": "user", "content": content},
+            ],
+            tools=[oai_tool],
+            tool_choice={"type": "function", "function": {"name": "create_plan"}},
         )
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "create_plan":
-                raw_tasks = block.input["tasks"]
-                systems = block.input.get("systems", [])
-                tool_requests = block.input.get("tool_requests", [])
-                subtasks = [
-                    SubTask(
-                        id=t["id"],
-                        description=t["description"],
-                        agent=AgentType(t["agent"]),
-                        depends_on=t.get("depends_on", []),
-                    )
-                    for t in raw_tasks
-                ]
-                return subtasks, systems, tool_requests
+        msg = response.choices[0].message
+        if msg.tool_calls:
+            import json as _json
+            args = _json.loads(msg.tool_calls[0].function.arguments)
+            raw_tasks = args.get("tasks", [])
+            systems = args.get("systems", [])
+            tool_requests = args.get("tool_requests", [])
+            subtasks = [
+                SubTask(
+                    id=t["id"],
+                    description=t["description"],
+                    agent=AgentType(t["agent"]),
+                    depends_on=t.get("depends_on", []),
+                )
+                for t in raw_tasks
+            ]
+            return subtasks, systems, tool_requests
         return [SubTask("t1", request, AgentType.CODE)], [], []
 
     async def _forge_tools(self, requests: list[dict]):
@@ -220,16 +231,15 @@ class Orchestrator:
             mark = "✓" if r.success else "✗"
             parts.append(f"[{mark} {r.agent}]\n{r.output or r.error}")
         combined = "\n\n".join(parts)
-        response = await self.client.messages.create(
+        response = await self.client.chat.completions.create(
             model=config.ORCHESTRATOR_MODEL,
             max_tokens=2048,
-            system=[{"type": "text", "text": "你是一个结果整合器。将多个 agent 的执行结果整合为清晰、简洁的最终回复。", "cache_control": {"type": "ephemeral"}}],
-            messages=[{
-                "role": "user",
-                "content": f"原始请求：{request}\n\n各 agent 结果：\n{combined}\n\n请整合为最终回复。",
-            }],
+            messages=[
+                {"role": "system", "content": "你是一个结果整合器。将多个 agent 的执行结果整合为清晰、简洁的最终回复。"},
+                {"role": "user", "content": f"原始请求：{request}\n\n各 agent 结果：\n{combined}\n\n请整合为最终回复。"},
+            ],
         )
-        text = response.content[0].text
+        text = response.choices[0].message.content or ""
         if self.tools_created:
             names = "、".join(self.tools_created)
             text += f"\n\n*（本次自动创建了新工具：{names}，已保存供后续使用）*"

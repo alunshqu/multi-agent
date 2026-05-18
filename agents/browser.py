@@ -1,4 +1,4 @@
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from agents.base import BaseAgent
 from core.task import SubTask, TaskResult
 from core.context import SharedContext
@@ -22,7 +22,7 @@ _COMPUTER_TOOLS = [
 
 
 class BrowserAgent(BaseAgent):
-    def __init__(self, client: AsyncAnthropic, context: SharedContext):
+    def __init__(self, client: AsyncOpenAI, context: SharedContext):
         super().__init__(client, context)
         w, h = get_screen_size()
         _COMPUTER_TOOLS[0]["display_width_px"] = w

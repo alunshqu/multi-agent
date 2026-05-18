@@ -1,5 +1,5 @@
 import json
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from memory.store import MemoryStore
 from memory.layers import Episode, Skill, EvolutionEntry
 from datetime import datetime
@@ -38,7 +38,7 @@ _EVOLVE_PROMPT = """现有技能「{name}」的工作流程：
 
 
 class SkillCrystallizer:
-    def __init__(self, store: MemoryStore, client: AsyncAnthropic):
+    def __init__(self, store: MemoryStore, client: AsyncOpenAI):
         self.store = store
         self.client = client
 
@@ -76,12 +76,12 @@ class SkillCrystallizer:
         )
         prompt = _CRYSTALLIZE_PROMPT.format(n=len(episodes), summaries=summaries)
 
-        resp = await self.client.messages.create(
+        resp = await self.client.chat.completions.create(
             model=config.AGENT_MODEL,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = _extract_json(resp.content[0].text)
+        raw = _extract_json(resp.choices[0].message.content)
         if not raw:
             return
 
@@ -136,12 +136,12 @@ class SkillCrystallizer:
             n=len(new_episodes),
             deviations=deviations,
         )
-        resp = await self.client.messages.create(
+        resp = await self.client.chat.completions.create(
             model=config.AGENT_MODEL,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = _extract_json(resp.content[0].text)
+        raw = _extract_json(resp.choices[0].message.content)
         if not raw:
             return
 

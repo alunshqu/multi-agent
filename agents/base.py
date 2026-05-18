@@ -1,12 +1,12 @@
 from abc import ABC, abstractmethod
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from core.task import SubTask, TaskResult
 from core.context import SharedContext
 import config
 
 
 class BaseAgent(ABC):
-    def __init__(self, client: AsyncAnthropic, context: SharedContext):
+    def __init__(self, client: AsyncOpenAI, context: SharedContext):
         self.client = client
         self.context = context
 
@@ -28,40 +28,68 @@ class BaseAgent(ABC):
     async def execute(self, task: SubTask) -> TaskResult:
         pass
 
-    def _system_block(self) -> list:
-        return [{"type": "text", "text": self.system_prompt, "cache_control": {"type": "ephemeral"}}]
+    def _oai_tools(self, tools: list) -> list:
+        """把工具定义转成 OpenAI function 格式。"""
+        result = []
+        for t in tools:
+            # 跳过 computer_use / bash beta 工具（browser agent 专用，单独处理）
+            if t.get("type") and t["type"] != "function":
+                continue
+            result.append({
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            })
+        return result
 
-    async def _agentic_loop(self, messages: list, tools: list, extra_kwargs: dict = None) -> str:
-        """Run the tool-use loop until Claude stops calling tools."""
-        kwargs = {
-            "model": config.AGENT_MODEL,
-            "max_tokens": config.MAX_TOKENS,
-            "system": self._system_block(),
-            "messages": messages,
-            "tools": tools,
-        }
-        if extra_kwargs:
-            kwargs.update(extra_kwargs)
+    async def _agentic_loop(self, messages: list, tools: list, **kwargs) -> str:
+        """OpenAI tool_calls agentic loop，直到模型不再调用工具为止。"""
+        oai_tools = self._oai_tools(tools)
+        system = [{"role": "system", "content": self.system_prompt}]
+
+        history = system + messages
+        call_kwargs = dict(
+            model=config.AGENT_MODEL,
+            max_tokens=config.MAX_TOKENS,
+            messages=history,
+        )
+        if oai_tools:
+            call_kwargs["tools"] = oai_tools
+            call_kwargs["tool_choice"] = "auto"
 
         while True:
-            response = await self.client.messages.create(**kwargs)
+            resp = await self.client.chat.completions.create(**call_kwargs)
+            msg = resp.choices[0].message
 
-            tool_uses = [b for b in response.content if b.type == "tool_use"]
-            if not tool_uses:
-                texts = [b.text for b in response.content if b.type == "text"]
-                return "\n".join(texts)
+            # 没有工具调用 → 返回文本
+            if not msg.tool_calls:
+                return msg.content or ""
 
-            messages = messages + [{"role": "assistant", "content": response.content}]
+            # 追加 assistant 消息
+            history = history + [msg]
+
+            # 执行所有工具调用
             tool_results = []
-            for tu in tool_uses:
-                result_content = await self._handle_tool(tu.name, tu.input)
+            for tc in msg.tool_calls:
+                import json
+                try:
+                    args = json.loads(tc.function.arguments)
+                except Exception:
+                    args = {}
+                result_content = await self._handle_tool(tc.function.name, args)
+                # result_content 是 list[dict]，取第一个 text
+                text = result_content[0].get("text", "") if result_content else ""
                 tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tu.id,
-                    "content": result_content if isinstance(result_content, list) else [result_content],
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": text,
                 })
-            messages = messages + [{"role": "user", "content": tool_results}]
-            kwargs["messages"] = messages
+
+            history = history + tool_results
+            call_kwargs["messages"] = history
 
     async def _handle_tool(self, name: str, input: dict) -> list:
         return [{"type": "text", "text": f"Tool {name} not implemented"}]

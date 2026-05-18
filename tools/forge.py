@@ -1,7 +1,7 @@
 import json
 import re
 from pathlib import Path
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from tools.executor import execute_python
 import config
 
@@ -25,7 +25,7 @@ _GEN_PROMPT = """生成一个独立的 Python 工具函数。
 
 
 class ToolForge:
-    def __init__(self, client: AsyncAnthropic):
+    def __init__(self, client: AsyncOpenAI):
         self.client = client
         _TOOLS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -89,12 +89,12 @@ class ToolForge:
             parameters=json.dumps(parameters, ensure_ascii=False),
             extra="\n".join(extra_lines),
         )
-        resp = await self.client.messages.create(
+        resp = await self.client.chat.completions.create(
             model=config.AGENT_MODEL,
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )
-        code = resp.content[0].text.strip()
+        code = resp.choices[0].message.content.strip()
         # 去掉可能的 markdown 代码块
         code = re.sub(r"^```(?:python)?\n?", "", code)
         code = re.sub(r"\n?```$", "", code)

@@ -1,24 +1,26 @@
 import asyncio
 import sys
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
 from agents.orchestrator import Orchestrator
 from core.context import SharedContext
+from memory.store import MemoryStore
 import config
 
 console = Console()
 
 
 async def main():
-    if not config.ANTHROPIC_API_KEY:
-        console.print("[red]错误：请在 .env 文件中设置 ANTHROPIC_API_KEY[/red]")
+    if not config.OPENAI_API_KEY:
+        console.print("[red]错误：请设置 OPENAI_API_KEY 环境变量[/red]")
         sys.exit(1)
 
-    client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+    client = AsyncOpenAI(api_key=config.OPENAI_API_KEY, base_url=config.OPENAI_BASE_URL)
+    store = MemoryStore()
     context = SharedContext()
-    orchestrator = Orchestrator(client, context)
+    orchestrator = Orchestrator(client, context, store)
 
     console.print(Panel("[bold cyan]Multi-Agent Framework[/bold cyan]\n输入任务，输入 'exit' 退出", expand=False))
 
