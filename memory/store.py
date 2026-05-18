@@ -5,7 +5,6 @@ from memory.layers import Pattern, Procedure, Episode, Skill, EvolutionEntry
 
 _BASE = Path.home() / ".multi_agent"
 _DB_PATH = _BASE / "memory.db"
-_CHROMA_PATH = _BASE / "chroma"
 
 
 class MemoryStore:
@@ -14,7 +13,6 @@ class MemoryStore:
         self._conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
-        self._init_chroma()
 
     def _init_schema(self):
         self._conn.executescript("""
@@ -49,6 +47,8 @@ class MemoryStore:
                 execution_summary TEXT DEFAULT '',
                 created_at TEXT
             );
+            CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts
+                USING fts5(id UNINDEXED, intent, content=episodes, content_rowid=rowid);
             CREATE TABLE IF NOT EXISTS skills (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -69,16 +69,7 @@ class MemoryStore:
         """)
         self._conn.commit()
 
-    def _init_chroma(self):
-        try:
-            import chromadb
-            client = chromadb.PersistentClient(path=str(_CHROMA_PATH))
-            self._col = client.get_or_create_collection("episodes")
-            self._has_chroma = True
-        except ImportError:
-            self._has_chroma = False
-
-    # ── Pattern ──────────────────────────────────────────────────────────────
+    # ── Pattern ───────────────────────────────────────────────────────────────
 
     def save_pattern(self, p: Pattern):
         self._conn.execute(
@@ -117,10 +108,9 @@ class MemoryStore:
         return [self._to_procedure(r) for r in rows]
 
     def procedure_exists(self, system: str) -> bool:
-        row = self._conn.execute(
+        return self._conn.execute(
             "SELECT id FROM procedures WHERE system_name=?", (system,)
-        ).fetchone()
-        return row is not None
+        ).fetchone() is not None
 
     # ── Episode ───────────────────────────────────────────────────────────────
 
@@ -135,19 +125,12 @@ class MemoryStore:
              e.failure_reason, e.execution_summary,
              e.created_at),
         )
+        # 同步更新 FTS 索引
+        self._conn.execute(
+            "INSERT OR REPLACE INTO episodes_fts(id, intent) VALUES (?,?)",
+            (e.id, e.intent),
+        )
         self._conn.commit()
-
-        if self._has_chroma:
-            self._col.upsert(
-                ids=[e.id],
-                documents=[e.intent],
-                metadatas=[{
-                    "outcome": e.outcome,
-                    "task_shape": e.task_shape,
-                    "systems": ",".join(e.systems),
-                    "agents": ",".join(e.agents_used),
-                }],
-            )
 
     def update_feedback(self, episode_id: str, feedback: str):
         self._conn.execute(
@@ -159,34 +142,51 @@ class MemoryStore:
     def find_similar_episodes(
         self, intent: str, systems: list[str], top_k: int = 3
     ) -> list[Episode]:
-        if not self._has_chroma:
+        """用 FTS5 全文检索 + 系统交集过滤，无需外部模型。"""
+        if not intent.strip():
             return []
 
-        fetch = min(top_k * 4, 20)
-        results = self._col.query(query_texts=[intent], n_results=fetch)
-        if not results["ids"][0]:
+        # 把 intent 拆成关键词做 FTS 查询
+        keywords = " OR ".join(
+            f'"{w}"' for w in intent.split() if len(w) > 1
+        )
+        if not keywords:
             return []
 
-        # Hard filter: prefer episodes with overlapping systems
-        ranked_ids: list[str] = []
-        fallback_ids: list[str] = []
-        for i, meta in enumerate(results["metadatas"][0]):
-            ep_systems = set(meta.get("systems", "").split(","))
-            eid = results["ids"][0][i]
-            if systems and ep_systems.intersection(systems):
-                ranked_ids.append(eid)
-            else:
-                fallback_ids.append(eid)
-
-        candidate_ids = (ranked_ids + fallback_ids)[:top_k]
-        if not candidate_ids:
+        try:
+            rows = self._conn.execute(
+                """SELECT e.* FROM episodes e
+                   JOIN episodes_fts f ON e.id = f.id
+                   WHERE episodes_fts MATCH ?
+                   ORDER BY rank LIMIT ?""",
+                (keywords, top_k * 3),
+            ).fetchall()
+        except Exception:
             return []
 
-        ph = ",".join("?" * len(candidate_ids))
+        episodes = [self._to_episode(r) for r in rows]
+
+        # 优先返回系统有交集的
+        if systems:
+            with_overlap = [e for e in episodes if set(e.systems).intersection(systems)]
+            without = [e for e in episodes if e not in with_overlap]
+            episodes = (with_overlap + without)[:top_k]
+        else:
+            episodes = episodes[:top_k]
+
+        return episodes
+
+    def find_success_episodes(self, agents: list[str], systems: list[str]) -> list[Episode]:
         rows = self._conn.execute(
-            f"SELECT * FROM episodes WHERE id IN ({ph})", candidate_ids
+            "SELECT * FROM episodes WHERE outcome='success'"
         ).fetchall()
-        return [self._to_episode(r) for r in rows]
+        episodes = [self._to_episode(r) for r in rows]
+        result = []
+        for e in episodes:
+            if set(e.agents_used).intersection(agents):
+                if not systems or set(e.systems).intersection(systems):
+                    result.append(e)
+        return result
 
     def find_failure_episodes(self, systems: list[str]) -> list[Episode]:
         rows = self._conn.execute(
@@ -196,20 +196,6 @@ class MemoryStore:
         if systems:
             episodes = [e for e in episodes if set(e.systems).intersection(systems)]
         return episodes
-
-    def find_success_episodes(self, agents: list[str], systems: list[str]) -> list[Episode]:
-        """找出 agent 序列和系统有交集的成功 episode，用于 Skill 提炼。"""
-        rows = self._conn.execute(
-            "SELECT * FROM episodes WHERE outcome='success'"
-        ).fetchall()
-        episodes = [self._to_episode(r) for r in rows]
-        result = []
-        for e in episodes:
-            agent_overlap = set(e.agents_used).intersection(agents)
-            system_overlap = set(e.systems).intersection(systems) if systems else True
-            if agent_overlap and system_overlap:
-                result.append(e)
-        return result
 
     # ── Skill ─────────────────────────────────────────────────────────────────
 
@@ -239,22 +225,18 @@ class MemoryStore:
         return [self._to_skill(r) for r in rows]
 
     def find_matching_skills(self, intent: str, agents: list[str], systems: list[str]) -> list[Skill]:
-        """按 agent 序列和系统交集匹配 Skill，再按触发词过滤。"""
         all_skills = self.load_all_skills()
         scored: list[tuple[int, Skill]] = []
         intent_lower = intent.lower()
         for s in all_skills:
             score = 0
-            # agent 交集
             score += len(set(s.typical_agents).intersection(agents)) * 3
-            # system 交集
             score += len(set(s.typical_systems).intersection(systems)) * 2
-            # 触发词命中
             score += sum(1 for kw in s.trigger_patterns if kw.lower() in intent_lower)
             if score > 0:
                 scored.append((score, s))
         scored.sort(key=lambda x: -x[0])
-        return [s for _, s in scored[:2]]  # 最多返回 2 个最相关的 Skill
+        return [s for _, s in scored[:2]]
 
     def increment_skill_usage(self, skill_id: str, success: bool):
         self._conn.execute(
@@ -264,10 +246,8 @@ class MemoryStore:
         self._conn.commit()
 
     def skill_covers_episodes(self, episode_ids: list[str]) -> bool:
-        """检查是否已有 Skill 覆盖了这批 episode（避免重复提炼）。"""
-        all_skills = self.load_all_skills()
         ep_set = set(episode_ids)
-        for s in all_skills:
+        for s in self.load_all_skills():
             if ep_set.issubset(set(s.source_episodes)):
                 return True
         return False
