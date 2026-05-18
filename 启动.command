@@ -1,9 +1,22 @@
 #!/bin/bash
 cd "$(dirname "$0")"
-if [ ! -f .env ]; then
-  cp .env.example .env
-  open -e .env
-  osascript -e 'display dialog "请在打开的 .env 文件中填入你的 ANTHROPIC_API_KEY，保存后重新双击启动。" buttons {"好的"} default button 1'
-  exit 0
+
+VENV_PYTHON="$(dirname "$0")/.venv/bin/python"
+VENV_CHROMA="$(dirname "$0")/.venv/bin/chroma"
+
+# 检查 ChromaDB 服务是否已在运行
+if ! curl -s http://localhost:8001/api/v2/heartbeat > /dev/null 2>&1; then
+  echo "启动 ChromaDB 服务..."
+  nohup "$VENV_CHROMA" run --path ~/.multi_agent/chroma --port 8001 > /tmp/chroma.log 2>&1 &
+  # 等待服务就绪（最多 10 秒）
+  for i in $(seq 1 10); do
+    sleep 1
+    if curl -s http://localhost:8001/api/v2/heartbeat > /dev/null 2>&1; then
+      echo "ChromaDB 已就绪"
+      break
+    fi
+  done
 fi
-python3 app.py
+
+# 启动主程序
+"$VENV_PYTHON" app.py
